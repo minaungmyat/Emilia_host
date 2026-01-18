@@ -8,6 +8,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 type CandleProps = ThreeElements["group"] & {
   isLit?: boolean;
+  blowIntensity?: number;
 };
 
 type FlameUniforms = {
@@ -82,7 +83,7 @@ const fragmentShader = `
   }
 `;
 
-export function Candle({ children, isLit = true, ...groupProps }: CandleProps) {
+export function Candle({ children, isLit = true, blowIntensity = 0, ...groupProps }: CandleProps) {
   const gltf = useLoader(GLTFLoader, "/candle.glb");
   const candleScene = useMemo<Group | null>(() => gltf.scene?.clone(true) ?? null, [gltf.scene]);
   const lightRef = useRef<PointLight>(null);
@@ -132,7 +133,8 @@ export function Candle({ children, isLit = true, ...groupProps }: CandleProps) {
     );
 
     const light = lightRef.current;
-    if (!light) {
+    const flame = flameMeshRef.current;
+    if (!light || !flame) {
       return;
     }
     lightStrengthRef.current = MathUtils.damp(
@@ -142,20 +144,29 @@ export function Candle({ children, isLit = true, ...groupProps }: CandleProps) {
       delta
     );
 
+    // Natural flicker + blow effect
     const flicker =
       Math.sin(elapsed * 10.0) * 0.08 +
       Math.sin(elapsed * 15.3) * 0.04 +
       Math.sin(elapsed * 8.7) * 0.03;
 
+    // Blow animation - flame bends and flickers based on intensity
+    const blowEffect = blowIntensity * 0.7;
+    const flickerIntensity = blowIntensity * 0.35;
+
     const strength = flameUniforms.strength.value;
-    light.intensity = Math.max(0, lightStrengthRef.current + flicker * strength * 0.5);
-    light.position.y = 3.5 + Math.sin(elapsed * 5.0) * 0.1;
-    light.position.x = Math.sin(elapsed * 3.0) * 0.05;
+    light.intensity = Math.max(0, lightStrengthRef.current + (flicker + flickerIntensity) * strength * 0.5);
+    light.position.y = 3.5 + Math.sin(elapsed * 5.0) * 0.1 - blowEffect * 0.15;
+    light.position.x = Math.sin(elapsed * 3.0) * 0.05 + blowEffect * 0.3;
     light.position.z = Math.cos(elapsed * 2.7) * 0.05;
     light.visible = strength > 0.02;
-    if (flameMeshRef.current) {
-      flameMeshRef.current.visible = strength > 0.02;
-    }
+    
+    // Flame mesh bends and scales with blow
+    flame.visible = strength > 0.02;
+    flame.position.x = blowEffect * 0.4;
+    flame.position.y = 2.9 - blowEffect * 0.2;
+    flame.rotation.z = blowEffect * 0.5;
+    flame.scale.setScalar(0.6 * (1 - blowEffect * 0.3));
   });
 
   if (!candleScene) {
@@ -165,7 +176,7 @@ export function Candle({ children, isLit = true, ...groupProps }: CandleProps) {
   return (
     <group {...groupProps}>
       <primitive object={candleScene} />
-      <mesh ref={flameMeshRef} scale={0.4} position={[0, 2.9, 0]} material={flameMaterial}>
+      <mesh ref={flameMeshRef} scale={0.6} position={[0, 2.9, 0]} material={flameMaterial}>
         <sphereGeometry args={[0.5, 32, 32]} />
       </mesh>
       <pointLight ref={lightRef} distance={5} color="#ffffffff" decay={1} />

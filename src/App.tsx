@@ -1,5 +1,5 @@
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Environment, OrbitControls } from "@react-three/drei";
+import { Canvas, useFrame, useThree, useLoader } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
 import {
   Suspense,
   useCallback,
@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import type { Group } from "three";
-import { Vector3 } from "three";
+import { BackSide, TextureLoader, Vector3 } from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { Candle } from "./models/candle";
 import { Cake } from "./models/cake";
@@ -32,6 +32,7 @@ type AnimatedSceneProps = {
   onBackgroundFadeChange?: (opacity: number) => void;
   onEnvironmentProgressChange?: (progress: number) => void;
   candleLit: boolean;
+  blowIntensity: number;
   onAnimationComplete?: () => void;
   cards: ReadonlyArray<BirthdayCardConfig>;
   activeCardId: string | null;
@@ -77,11 +78,11 @@ const BACKGROUND_FADE_START = Math.max(
 );
 
 const TYPED_LINES = [
-  "> tina",
+  "> Emilia",
   "...",
-  "> today is your birthday",
+  "> Today is your 20th birthday",
   "...",
-  "> so i made you this computer program",
+  "> So Happy Birthday to you!",
   "...",
   "٩(◕‿◕)۶ ٩(◕‿◕)۶ ٩(◕‿◕)۶"
 ];
@@ -99,17 +100,29 @@ type BirthdayCardConfig = {
 const BIRTHDAY_CARDS: ReadonlyArray<BirthdayCardConfig> = [
   {
     id: "confetti",
-    image: "/card.png",
+    image: "/birthday-card.jpeg",
     position: [1, 0.081, -2],
     rotation: [-Math.PI / 2 , 0, Math.PI / 3],
   }
 ];
+
+function PanoramaBackground({ opacity = 1 }: { opacity?: number }) {
+  const texture = useLoader(TextureLoader, "/wojciech-portnicki-klS2yWjGESU-unsplash.jpg");
+  
+  return (
+    <mesh scale={[-1, 1, 1]}>
+      <sphereGeometry args={[500, 60, 40]} />
+      <meshBasicMaterial map={texture} side={BackSide} transparent opacity={opacity} />
+    </mesh>
+  );
+}
 
 function AnimatedScene({
   isPlaying,
   onBackgroundFadeChange,
   onEnvironmentProgressChange,
   candleLit,
+  blowIntensity,
   onAnimationComplete,
   cards,
   activeCardId,
@@ -305,7 +318,7 @@ function AnimatedScene({
         <Cake />
       </group>
       <group ref={candleGroup}>
-        <Candle isLit={candleLit} scale={0.25} position={[0, 1.1, 0]} />
+        <Candle isLit={candleLit} blowIntensity={blowIntensity} scale={0.25} position={[0, 1.1, 0]} />
       </group>
     </>
   );
@@ -345,27 +358,6 @@ function ConfiguredOrbitControls() {
   );
 }
 
-type EnvironmentBackgroundControllerProps = {
-  intensity: number;
-};
-
-function EnvironmentBackgroundController({
-  intensity,
-}: EnvironmentBackgroundControllerProps) {
-  const scene = useThree((state) => state.scene);
-
-  useEffect(() => {
-    if ("backgroundIntensity" in scene) {
-      // Cast required because older typings might not include backgroundIntensity yet.
-      (scene as typeof scene & { backgroundIntensity: number }).backgroundIntensity =
-        intensity;
-    }
-  }, [scene, intensity]);
-
-  return null;
-}
-
-
 export default function App() {
   const [hasStarted, setHasStarted] = useState(false);
   const [backgroundOpacity, setBackgroundOpacity] = useState(1);
@@ -378,7 +370,12 @@ export default function App() {
   const [isCandleLit, setIsCandleLit] = useState(true);
   const [fireworksActive, setFireworksActive] = useState(false);
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
+  const [blowIntensity, setBlowIntensity] = useState(0);
   const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const blowDetectionActiveRef = useRef(false);
 
   useEffect(() => {
     const audio = new Audio("/music.mp3");
@@ -390,6 +387,101 @@ export default function App() {
       backgroundAudioRef.current = null;
     };
   }, []);
+
+  // Blow detection setup
+  const startBlowDetection = useCallback(() => {
+    if (blowDetectionActiveRef.current) return;
+
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then((stream) => {
+        micStreamRef.current = stream;
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioContextRef.current = audioContext;
+
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.3;
+        analyserRef.current = analyser;
+
+        const microphone = audioContext.createMediaStreamSource(stream);
+        microphone.connect(analyser);
+
+        blowDetectionActiveRef.current = true;
+
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+
+        const detectBlow = () => {
+          if (!blowDetectionActiveRef.current) return;
+
+          analyser.getByteFrequencyData(dataArray);
+
+          // Calculate volume (average of all frequencies)
+          let sum = 0;
+          for (let i = 0; i < bufferLength; i++) {
+            sum += dataArray[i];
+          }
+          const average = sum / bufferLength;
+
+          // Detect low-frequency dominance (blow sound characteristic)
+          const lowFreqSum = dataArray.slice(0, 20).reduce((a, b) => a + b, 0) / 20;
+          const midFreqSum = dataArray.slice(20, 100).reduce((a, b) => a + b, 0) / 80;
+
+          // Calculate blow intensity for flame animation (0 to 1)
+          const isBlowSound = lowFreqSum > midFreqSum * 1.2;
+          let intensity = 0;
+          
+          if (isBlowSound && average > 25) {
+            // Soft blow starts at 25, scales up to hard blow at 70+
+            intensity = Math.min((average - 25) / 45, 1);
+            setBlowIntensity(intensity);
+          } else {
+            // Smoothly decay intensity when not blowing
+            setBlowIntensity(prev => Math.max(0, prev * 0.9));
+          }
+
+          // Only extinguish with hard blow (threshold 65+)
+          if (average > 65 && isBlowSound) {
+            if (hasAnimationCompleted && isCandleLit) {
+              setIsCandleLit(false);
+              setFireworksActive(true);
+              setBlowIntensity(0);
+              stopBlowDetection();
+              return;
+            }
+          }
+
+          requestAnimationFrame(detectBlow);
+        };
+
+        detectBlow();
+      })
+      .catch((err) => {
+        console.log("Microphone access denied or unavailable:", err);
+      });
+  }, [hasAnimationCompleted, isCandleLit]);
+
+  const stopBlowDetection = useCallback(() => {
+    blowDetectionActiveRef.current = false;
+    setBlowIntensity(0);
+    
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(track => track.stop());
+      micStreamRef.current = null;
+    }
+    
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopBlowDetection();
+    };
+  }, [stopBlowDetection]);
 
   const playBackgroundMusic = useCallback(() => {
     const audio = backgroundAudioRef.current;
@@ -486,6 +578,13 @@ export default function App() {
     return () => window.clearInterval(handle);
   }, []);
 
+  // Start blow detection when animation completes
+  useEffect(() => {
+    if (hasAnimationCompleted && isCandleLit) {
+      startBlowDetection();
+    }
+  }, [hasAnimationCompleted, isCandleLit, startBlowDetection]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.code !== "Space" && event.key !== " ") {
@@ -500,12 +599,13 @@ export default function App() {
       if (hasAnimationCompleted && isCandleLit) {
         setIsCandleLit(false);
         setFireworksActive(true);
+        stopBlowDetection();
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [hasStarted, hasAnimationCompleted, isCandleLit, playBackgroundMusic]);
+  }, [hasStarted, hasAnimationCompleted, isCandleLit, playBackgroundMusic, stopBlowDetection]);
 
   const handleCardToggle = useCallback((id: string) => {
     setActiveCardId((current) => (current === id ? null : id));
@@ -539,7 +639,7 @@ export default function App() {
         </div>
       </div>
       {hasAnimationCompleted && isCandleLit && (
-        <div className="hint-overlay">press space to blow out the candle</div>
+        <div className="hint-overlay">blow into your microphone or press space</div>
       )}
       <Canvas
         gl={{ alpha: true }}
@@ -552,6 +652,7 @@ export default function App() {
           <AnimatedScene
             isPlaying={isScenePlaying}
             candleLit={isCandleLit}
+            blowIntensity={blowIntensity}
             onBackgroundFadeChange={setBackgroundOpacity}
             onEnvironmentProgressChange={setEnvironmentProgress}
             onAnimationComplete={() => setHasAnimationCompleted(true)}
@@ -559,17 +660,9 @@ export default function App() {
             activeCardId={activeCardId}
             onToggleCard={handleCardToggle}
           />
-          <ambientLight intensity={(1 - environmentProgress) * 0.8} />
-          <directionalLight intensity={0.5} position={[2, 10, 0]} color={[1, 0.9, 0.95]}/>
-          <Environment
-            files={["/shanghai_bund_4k.hdr"]}
-            backgroundRotation={[0, 3.3, 0]}
-            environmentRotation={[0, 3.3, 0]}
-            background
-            environmentIntensity={0.1 * environmentProgress}
-            backgroundIntensity={0.05 * environmentProgress}
-          />
-          <EnvironmentBackgroundController intensity={0.05 * environmentProgress} />
+          <PanoramaBackground opacity={environmentProgress} />
+          <ambientLight intensity={0.8 + environmentProgress * 0.5} />
+          <directionalLight intensity={0.5 + environmentProgress * 0.3} position={[2, 10, 0]} color={[1, 0.9, 0.95]}/>
           <Fireworks isActive={fireworksActive} origin={[0, 10, 0]} />
           <ConfiguredOrbitControls />
         </Suspense>
